@@ -1,12 +1,22 @@
 import path from "node:path";
 
-import { createAgentUIStreamResponse } from "ai";
+import {
+  convertToModelMessages,
+  createAgentUIStreamResponse,
+  streamText,
+  type UIMessage,
+} from "ai";
 import { z } from "zod";
 
 import {
   callOptionsSchema,
   createSkillEngineAgent,
 } from "@/lib/agent/create-agent";
+import {
+  buildGeneralAssistantPrompt,
+  detectRequestIntent,
+  extractLatestUserText,
+} from "@/lib/agent/intent";
 import { requestContextSchema } from "@/lib/agent/schemas";
 import { getEnv } from "@/lib/config/env";
 import { LocalFileSkillStore } from "@/lib/skills/local-skill-store";
@@ -56,6 +66,7 @@ export async function POST(request: Request) {
   try {
     const { skillRootPath, skillService, scriptPolicy, agent } =
       getRuntimeResources();
+    const env = getEnv();
     const json = await request.json();
     const parsed = chatRequestSchema.safeParse(json);
 
@@ -67,6 +78,25 @@ export async function POST(request: Request) {
         },
         { status: 400 }
       );
+    }
+
+    const uiMessages = parsed.data.messages as UIMessage[];
+    const latestUserText = extractLatestUserText(parsed.data.messages);
+    const intent = await detectRequestIntent({
+      model: env.SKILL_ENGINE_MODEL,
+      latestUserText,
+    });
+
+    if (intent === "general") {
+      const result = streamText({
+        model: env.SKILL_ENGINE_MODEL,
+        system: buildGeneralAssistantPrompt(),
+        messages: await convertToModelMessages(uiMessages),
+      });
+
+      return result.toUIMessageStreamResponse({
+        originalMessages: uiMessages,
+      });
     }
 
     const skillsMetadata = await skillService.discoverSkillMetadata();
@@ -82,7 +112,7 @@ export async function POST(request: Request) {
 
     return createAgentUIStreamResponse({
       agent,
-      uiMessages: parsed.data.messages,
+      uiMessages,
       options,
       onStepFinish: ({ finishReason, usage, stepNumber, toolCalls }) => {
         // Server-side instrumentation for demo observability.
